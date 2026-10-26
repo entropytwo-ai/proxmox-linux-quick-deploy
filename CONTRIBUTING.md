@@ -62,7 +62,8 @@ Checklist before you open a PR:
 - [ ] `shellcheck` passes with no new warnings.
 - [ ] A fresh run (empty cache) and a cached run both work.
 - [ ] You can log in as both `DEFAULT_USER` and `root`, on the console and over SSH.
-- [ ] `CACHE_DIR` auto-detection still works when it's unset (check the `[*] Using cloud image cache:` line).
+- [ ] `CACHE_DIR` auto-detection still works when it's unset (check the "Image cache" line from `--check`).
+- [ ] Nothing is installed, downloaded or created before the user confirms. Anything new that changes the host must appear in the `--check` report and the deployment plan.
 - [ ] Existing OS options are unaffected. Re-test at least one, such as Debian 12.
 
 ## Testing storage detection without Proxmox
@@ -71,15 +72,16 @@ The detection logic reads `pvesm` and `STORAGE_CFG`, so you can try it on any Li
 
 ```bash
 mkdir -p /tmp/mock/bin
-printf '#!/bin/bash\nexit 0\n' | tee /tmp/mock/bin/{qm,pvesh,virt-customize} >/dev/null
+printf '#!/bin/bash\nexit 0\n' | tee /tmp/mock/bin/{qm,pvesh,virt-customize,libguestfs-test-tool} >/dev/null
 cat > /tmp/mock/bin/pvesm <<'EOF'
 #!/bin/bash
 [[ $1 == status ]] && printf 'Name Type Status\nlocal dir active\n'
 EOF
 chmod +x /tmp/mock/bin/*
 printf 'dir: local\n\tpath /tmp/mock\n\tcontent iso,images\n' > /tmp/mock/storage.cfg
-sudo env PATH=/tmp/mock/bin:$PATH STORAGE_CFG=/tmp/mock/storage.cfg OS_CHOICE=0 ./create-instant-vm.sh
-# -> [*] Using cloud image cache: /tmp/mock/cloud-images
+sudo env PATH=/tmp/mock/bin:$PATH STORAGE_CFG=/tmp/mock/storage.cfg ./create-instant-vm.sh --check
+# -> Image cache (downloads + customized images):
+#      /tmp/mock/cloud-images
 ```
 
 ## Submitting a pull request
