@@ -4,6 +4,16 @@
 
 `create-instant-vm.sh` turns "I need a fresh Linux VM" into a single menu choice. No ISO installers, no clicking through wizards: the VM boots straight into a working system with a user account, a password, and SSH you can log in to right away.
 
+## 🚀 One-line install
+
+Run this as root in your Proxmox VE shell:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/proxmox-linux-quick-deploy/main/create-instant-vm.sh)
+```
+
+It asks before installing anything on the host and shows the full plan before anything is downloaded or created. Add `--check` to the end for a dry run that changes nothing. More options are in [Quick start](#quick-start).
+
 ---
 
 ## Table of Contents
