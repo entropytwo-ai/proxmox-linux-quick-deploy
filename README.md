@@ -1,6 +1,6 @@
 # proxmox-linux-quick-deploy
 
-> Instantly deploy pre-configured Linux VMs on Proxmox with one script. Supports Ubuntu, Debian, Fedora, Arch, NixOS, Rocky, Alpine, and Omarchy.
+> Instantly deploy pre-configured Linux VMs on Proxmox with one script. Supports Ubuntu, Debian, Fedora, Arch, NixOS, Rocky, Alpine, and Omarchy, and always offers the **newest release** of each, discovered at runtime.
 
 `create-instant-vm.sh` turns "I need a fresh Linux VM" into a single menu choice. No ISO installers, no clicking through wizards: the VM boots straight into a working system with a user account, a password, and SSH you can log in to right away.
 
@@ -12,7 +12,7 @@ Run this as root in your Proxmox VE shell:
 bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/proxmox-linux-quick-deploy/main/create-instant-vm.sh)
 ```
 
-It asks before installing anything on the host and shows the full plan before anything is downloaded or created. Add `--check` to the end for a dry run that changes nothing. More options are in [Quick start](#quick-start).
+It asks before installing anything on the host and shows the full plan before anything is downloaded or created. Add `--check` to the end for a dry run that changes nothing, or `--list` to see which versions it would deploy right now. More options are in [Quick start](#quick-start).
 
 ---
 
@@ -23,6 +23,7 @@ It asks before installing anything on the host and shows the full plan before an
 - [Quick start](#quick-start)
 - [What the script changes on your host](#what-the-script-changes-on-your-host)
 - [Supported operating systems](#supported-operating-systems)
+- [Automatic version discovery](#automatic-version-discovery)
 - [Configuration](#configuration)
 - [Storage auto-detection](#storage-auto-detection)
 - [How NixOS works](#how-nixos-works)
@@ -37,11 +38,11 @@ It asks before installing anything on the host and shows the full plan before an
 ## What it does
 
 1. **Finds a cache directory** for cloud images by asking Proxmox (`pvesm`) where your file-based storage lives. See [Storage auto-detection](#storage-auto-detection).
-2. **Checks for host software** (`libguestfs-tools`, `wget`, `curl`). If any is missing it shows exactly what `apt-get` would install, including dependencies and disk usage, and **asks before installing**. After installing, it boots the libguestfs appliance once to prove `virt-customize` really works. If it doesn't, it **asks** before running `update-guestfs-appliance`.
+2. **Checks for host software** (`libguestfs-tools`, `wget`, `curl`, `openssl`). If any is missing it shows exactly what `apt-get` would install, including dependencies and disk usage, and **asks before installing**. After installing, it boots the libguestfs appliance once to prove `virt-customize` really works. If it doesn't, it **asks** before running `update-guestfs-appliance`.
 3. **Shows the full deployment plan** and asks you to confirm: where images will be downloaded and cached, which Proxmox storage will hold the VM disks (with free space), the bridge, VMID, name and resources. See [What the script changes on your host](#what-the-script-changes-on-your-host).
-4. **Downloads the official cloud image** for the OS you pick. This happens once per OS and is cached.
-5. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize`: root password, a sudo user, SSH password login enabled. This also happens once per OS and is cached.
-6. **Creates the VM** with the next free VMID and a unique name (`Linux-New-1`, `Linux-New-2`, …), VirtIO SCSI + iothread, QEMU guest agent, serial console, and cloud-init (except NixOS).
+4. **Finds the newest release** of the OS you pick on its official mirror (see [Automatic version discovery](#automatic-version-discovery)), then **downloads the cloud image and verifies its checksum**. This happens once per release and is cached.
+5. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize` (or `guestfish` for NixOS): root password, a sudo user, SSH password login enabled. This also happens once per release and is cached.
+6. **Creates the VM** with the next free VMID and a unique name (`Linux-New-1`, `Linux-New-2`, …), VirtIO SCSI + iothread, QEMU guest agent (except NixOS), serial console, and cloud-init (except NixOS).
 7. **Imports and resizes the disk**, then **starts the VM**.
 
 Once both images are cached, a new VM is usually ready in seconds.
@@ -91,7 +92,8 @@ DEFAULT_USER=alice DEFAULT_PASS='S3cure!' ./create-instant-vm.sh --yes
 
 | Option | Effect |
 |---|---|
-| `-c`, `--check` | Dry run. Reports Proxmox/root status, which host packages are present or missing, the exact `apt-get` command and what it would pull in, the image cache path (and free space), the VM disk storage, the bridge, and any already-cached images. Also boots the libguestfs appliance to confirm `virt-customize` works. Changes nothing. Exit code `0` = ready, `1` = action needed. |
+| `-c`, `--check` | Dry run. Reports Proxmox/root status, which host packages are present or missing, the exact `apt-get` command and what it would pull in, the image cache path (and free space), the VM disk storage, the bridge, the newest image for every OS (looked up live), and any already-cached images. Also boots the libguestfs appliance to confirm `virt-customize` works. Changes nothing. Exit code `0` = ready, `1` = action needed. |
+| `-l`, `--list` | Looks up the newest image for every menu entry, live from the official mirrors, and prints version + download URL. Needs only `curl`, no root and no Proxmox. Changes nothing. |
 | `-y`, `--yes` | Auto-confirm all prompts (same as `ASSUME_YES=1`). |
 | `-h`, `--help` | Show usage. |
 
@@ -101,11 +103,11 @@ Nothing happens behind your back. Every change to the hypervisor is announced fi
 
 | Change | When | Asks first? |
 |---|---|---|
-| `apt-get update` + `apt-get install -y libguestfs-tools` (and `wget`/`curl` if missing) | Only if something is missing | **Yes**, default **No**. Shows the package list (including dependencies) and download/disk size. If you decline, it prints the manual command and exits. |
+| `apt-get update` + `apt-get install -y libguestfs-tools` (and `wget`/`curl`/`openssl` if missing) | Only if something is missing | **Yes**, default **No**. Shows the package list (including dependencies) and download/disk size. If you decline, it prints the manual command and exits. |
 | `update-guestfs-appliance` | Only if `virt-customize` doesn't work | **Yes** |
 | Create the image cache directory | First run | Shown in the plan |
-| Download the cloud image into the cache | Once per OS | Shown in the plan (URL → path) |
-| Write a customized `ready-*` image into the cache | Once per OS | Shown in the plan |
+| Download the cloud image into the cache and verify its checksum | Once per release | Shown in the plan (URL → path, checksum source) |
+| Write a customized `ready-*` image into the cache | Once per release | Shown in the plan |
 | Create, import the disk into, and start a VM | Every run | Shown in the plan (VMID, name, storage, bridge, resources) |
 
 If there's no terminal (e.g. run from cron or a pipe) and `--yes` isn't given, the script **refuses** to install or create anything rather than assuming consent.
@@ -114,7 +116,7 @@ Example plan shown before anything is downloaded:
 
 ```
 ==================================================================
- Deployment plan: Debian 12 (Bookworm)
+ Deployment plan: Debian 13 (Trixie, stable, build 20261021-2638)
 ==================================================================
 Where things will go:
   Image cache (downloads + customized images):
@@ -127,9 +129,10 @@ Where things will go:
   Network bridge: vmbr0 (first Linux bridge)
 
 Cloud image:
-  [download] https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
-          -> /var/lib/vz/cloud-images/debian-12-generic-amd64.qcow2
-  [create]   customized image: /var/lib/vz/cloud-images/ready-debian-12-generic-amd64.qcow2
+  [download] https://cloud.debian.org/images/cloud/trixie/20261021-2638/debian-13-generic-amd64-20261021-2638.qcow2
+          -> /var/lib/vz/cloud-images/debian-13-trixie-20261021-2638.qcow2
+             verified against https://cloud.debian.org/images/cloud/trixie/20261021-2638/SHA512SUMS
+  [create]   customized image: /var/lib/vz/cloud-images/ready-debian-13-trixie-20261021-2638.qcow2
 
 New VM:
   ID / name : 105 / Linux-New-1
@@ -144,18 +147,50 @@ Proceed with this plan? [Y/n]
 
 ## Supported operating systems
 
-| # | OS | Version / channel | Boot | Cloud-init | Notes |
-|---|---|---|---|---|---|
-| 1 | Ubuntu | 24.04 LTS (Noble) | BIOS | ✅ | Stable LTS. |
-| 2 | Ubuntu | 26.04 daily (Resolute) | BIOS | ✅ | Development build, may break. |
-| 3 | Debian | 12 (Bookworm) | BIOS | ✅ | Stable. |
-| 4 | Debian | 13 (Trixie) | BIOS | ✅ | Daily build. |
-| 5 | Fedora | 41 Cloud Base | BIOS | ✅ | Uses the `wheel` group. |
-| 6 | Arch Linux | Latest cloud image | BIOS | ✅ | Rolling release. |
-| 7 | Omarchy | Arch + bootstrap script | BIOS | ✅ | 4 GB RAM / 32 GB disk by default. See [How Omarchy works](#how-omarchy-works). |
-| 8 | NixOS | Unstable (linuxcontainers.org VM image) | UEFI (OVMF) | ❌ | Declarative user injection. See [How NixOS works](#how-nixos-works). |
-| 9 | Rocky Linux | 9 GenericCloud | BIOS | ✅ | RHEL-compatible. |
-| 10 | Alpine Linux | 3.21 (BIOS cloud-init) | BIOS | ✅ | Very small footprint. |
+| # | Id (`OS_CHOICE`) | OS | Channel (resolved at runtime) | Boot | Cloud-init | Notes |
+|---|---|---|---|---|---|---|
+| 1 | `ubuntu-lts` | Ubuntu | Newest LTS | BIOS | ✅ | Stable LTS. |
+| 2 | `ubuntu-dev` | Ubuntu | Next release, daily build | BIOS | ✅ | Development build, may break. |
+| 3 | `debian-stable` | Debian | Current stable | BIOS | ✅ | |
+| 4 | `debian-testing` | Debian | Testing, daily build | BIOS | ✅ | Next Debian release. |
+| 5 | `fedora` | Fedora | Newest release with a Cloud image | BIOS | ✅ | Uses the `wheel` group. |
+| 6 | `arch` | Arch Linux | Newest dated cloud image | BIOS | ✅ | Rolling release. |
+| 7 | `omarchy` | Omarchy | Arch + bootstrap script | BIOS | ✅ | 4 GB RAM / 32 GB disk by default. See [How Omarchy works](#how-omarchy-works). |
+| 8 | `nixos` | NixOS | Newest unstable build (linuxcontainers.org) | UEFI (OVMF) | ❌ | See [How NixOS works](#how-nixos-works). |
+| 9 | `rocky` | Rocky Linux | Newest major + point release | BIOS | ✅ | RHEL-compatible. |
+| 10 | `alpine` | Alpine Linux | Newest stable (BIOS cloud-init) | BIOS | ✅ | Very small footprint. |
+| 11 | `ubuntu-latest` | Ubuntu | Newest release, incl. interim (non-LTS) | BIOS | ✅ | Same as LTS when the newest release is an LTS. |
+| 12 | `debian-oldstable` | Debian | Previous stable | BIOS | ✅ | |
+
+Run `./create-instant-vm.sh --list` to see the exact versions these resolve to today. Example output from October 2026: Ubuntu 26.04 LTS, Ubuntu 26.10 daily, Debian 13 and 14 (testing), Fedora 44, Rocky 10.2, Alpine 3.24.1.
+
+## Automatic version discovery
+
+The script contains **no hard-coded version numbers**, so it doesn't go stale when distros ship new releases. When you pick an OS, a small resolver function looks up the newest release on that distro's official servers:
+
+| OS | Where the version comes from |
+|---|---|
+| Ubuntu | Canonical's release metadata (`changelogs.ubuntu.com/meta-release[-development]`), then the newest dated build in `cloud-images.ubuntu.com/<codename>/` |
+| Debian | The suite alias in the archive (`deb.debian.org/debian/dists/stable/Release` → codename), then the newest dated build on `cloud.debian.org` |
+| Fedora | The release list on `dl.fedoraproject.org`, newest first, skipping releases that don't ship a Cloud image yet |
+| Rocky | The major-version list on `dl.rockylinux.org`, then the newest versioned GenericCloud image |
+| Alpine | The `latest-stable` branch on `dl-cdn.alpinelinux.org` |
+| Arch | The dated image in `geo.mirror.pkgbuild.com/images/latest/` |
+| NixOS | The newest build directory on `images.linuxcontainers.org` |
+
+What this gives you:
+
+- **New releases show up automatically.** When Ubuntu 28.04 LTS, Debian 14 or Fedora 45 ships with cloud images, the menu entries pick it up without a script update.
+- **Gaps are skipped.** If the newest release has no cloud image yet (Fedora 42, for example, never shipped one), the resolver falls back to the newest release that does.
+- **Every download is pinned and verified.** The script downloads a dated or versioned file, not a moving alias, and checks it against the distro's published SHA256/SHA512 checksum. A mismatch deletes the file and aborts.
+- **The cache refreshes itself.** Cached files carry the version in their name (e.g. `fedora-44-1.7.qcow2`, `ubuntu-26.04-resolute-20261016.qcow2`), so a new build is downloaded fresh while existing VMs and images are left alone. Old versions stay in the cache until you delete them.
+
+To pin a specific image instead, pass its URL. Discovery is skipped, and `OS_CHOICE` only chooses how the image is customized:
+
+```bash
+IMG_URL=https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img \
+OS_CHOICE=ubuntu-lts ./create-instant-vm.sh
+```
 
 ## Configuration
 
@@ -171,7 +206,8 @@ Every variable can be set in the environment before you run the script, or edite
 | `CORES` | `2` | vCPU cores. CPU type is `host`. |
 | `DEFAULT_USER` | `admin` | Sudo user created in the image. |
 | `DEFAULT_PASS` | `password123` | Password for `DEFAULT_USER` and `root`. **Change it.** |
-| `OS_CHOICE` | *(interactive)* | `1`–`10`. Skips the menu. |
+| `OS_CHOICE` | *(interactive)* | Menu number (`1`–`12`) or id (e.g. `fedora`, `debian-stable`). Skips the menu. |
+| `IMG_URL` | *(discovered)* | Use this image instead of the newest one. `OS_CHOICE` still picks the customization. |
 | `ASSUME_YES` | `0` | `1` auto-confirms all prompts (same as `--yes`). |
 | `STORAGE_CFG` | `/etc/pve/storage.cfg` | Proxmox storage config file to read (mostly useful for testing). |
 
@@ -203,21 +239,25 @@ The VM disk storage is chosen separately. It's the first active `images` storage
 
 ## How NixOS works
 
-NixOS doesn't use cloud-init the way other distros do, and changes made imperatively (like `useradd`) are lost on the next `nixos-rebuild`. So the script configures it **declaratively**:
+The NixOS image from linuxcontainers.org is not a normal cloud image. It boots a unified kernel image (UKI) from the EFI partition, and its root filesystem holds **only `/nix/store`**, with no `/etc` at all. `/etc` is generated on first boot. That's why `virt-customize` fails on it with *"no operating systems were found in the guest image"*: there's nothing for its OS detection to find.
 
-1. It writes a NixOS module, `/etc/nixos/proxmox-user.nix`, that defines:
-   - `users.users.root.initialPassword`
-   - `users.users.<DEFAULT_USER>` as a normal user in `wheel` and `networkmanager`
-   - `security.sudo.wheelNeedsPassword = false`
-   - `services.openssh` with password and root login enabled
-   - `services.qemuGuest.enable = true`
-2. It uploads the module into the image with `virt-customize --upload`.
-3. It patches `/etc/nixos/configuration.nix` so the module is imported: `imports = [ ./proxmox-user.nix …`.
-4. It sets the root password directly in the image so you can log in on the very first boot.
+So the script uses `guestfish` and writes plain files instead:
 
-The VM uses **UEFI (OVMF)** with an EFI disk (`pre-enrolled-keys=0`). No cloud-init drive is attached. Because the users are part of your configuration, they stay in place when you run `sudo nixos-rebuild switch`. Edit `/etc/nixos/proxmox-user.nix` to change them.
+1. It finds the root partition (the one that contains `/nix/store`).
+2. It writes `/etc/passwd`, `/etc/group` and `/etc/shadow` with `root` and `DEFAULT_USER` (in `wheel`), with SHA-512 password hashes made by `openssl passwd -6`. NixOS runs with `mutableUsers = true`, so on first boot its activation script **keeps these accounts** and merges in its own system users.
+3. It adds `/etc/systemd/network/90-proxmox-dhcp.network`, which turns on DHCP for any `en*`/`eth*` NIC. The upstream image only configures Incus' interface name (`enp5s0`), which a Proxmox VM doesn't have.
+4. It reads `/etc/shadow` back out of the image and refuses to cache it if the accounts aren't there.
 
-The newest unstable build is found by scraping the index at `images.linuxcontainers.org`.
+The VM uses **UEFI (OVMF)** with an EFI disk (`pre-enrolled-keys=0`). It has no cloud-init drive and no QEMU guest agent (the image doesn't include one, so the agent option is left off and shutdown uses ACPI).
+
+Logging in:
+
+- **SSH:** `ssh <DEFAULT_USER>@<ip>` with the password. `sudo` asks for the same password.
+- **Root:** the password works on the console (`qm terminal <vmid>` or noVNC) and through `sudo -i`. The image's SSH config allows root by key only (`PermitRootLogin prohibit-password`), so root password logins over SSH are refused.
+
+The accounts are ordinary mutable users. To manage them declaratively, add them to your own `/etc/nixos/configuration.nix` before running `nixos-rebuild switch`.
+
+This approach was tested by booting the customized image under QEMU with OVMF: it got a DHCP address, SSH password login worked, `sudo` worked, and the root partition grew to fill the disk.
 
 ## How Omarchy works
 
@@ -283,7 +323,7 @@ Enable `Disk image` content on a storage (Datacenter → Storage → Edit → Co
 <details>
 <summary><b>The download fails (404)</b></summary>
 
-Upstream image filenames change over time, especially Fedora, Alpine, and the daily builds. Update `IMG_NAME` / `IMG_URL` for that OS in the script and open a PR. Partial downloads are saved as `*.part` and never cached, so just run the script again.
+Versions are discovered at runtime, so renamed files and new releases are handled automatically. If a download still fails, the mirror may be temporarily broken. Run `./create-instant-vm.sh --list` to see what each entry resolves to, or pin a known-good image with `IMG_URL=<url> OS_CHOICE=<id>`. If a distro has changed its directory layout, its `resolve_<id>` function needs an update, so please open an issue or PR. Partial downloads are saved as `*.part` and never cached, so just run the script again.
 </details>
 
 <details>
@@ -296,9 +336,12 @@ Upstream image filenames change over time, especially Fedora, Alpine, and the da
 </details>
 
 <details>
-<summary><b>NixOS doesn't get an IP or rejects the password</b></summary>
+<summary><b>NixOS: "no operating systems were found in the guest image", no IP, or password rejected</b></summary>
 
-Make sure the build was fetched successfully (the scraper exits if it can't find one). The password comes from `initialPassword`, which applies only when a user is first created. Change it later with `passwd`.
+- The `virt-customize` error came from older versions of this script. Update the script and run it again. NixOS is now customized with `guestfish` (see [How NixOS works](#how-nixos-works)).
+- Root password logins over SSH are refused by design. Use `ssh <DEFAULT_USER>@<ip>` and `sudo`, or log in as root on the console.
+- No IP: check `networkctl` on the console. The script adds a DHCP rule for every `en*`/`eth*` interface.
+- An old `ready-nixos-*` image left over from a failed run is never reused, because ready images are only cached after they pass verification.
 </details>
 
 <details>
@@ -307,6 +350,8 @@ Make sure the build was fetched successfully (the scraper exits if it can't find
 ```bash
 rm -rf "$CACHE_DIR"        # removes all cached raw and ready images
 ```
+
+Cached files are versioned, so when a new release comes out the old files stay behind. List them with `--check` and delete the ones you no longer need.
 </details>
 
 ## Security notice

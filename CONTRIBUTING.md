@@ -1,39 +1,65 @@
 # Contributing
 
-Thanks for helping improve **proxmox-linux-quick-deploy**! The most valuable contributions are new OS options, fixes for upstream image URLs that have moved, and bug fixes.
+Thanks for helping improve **proxmox-linux-quick-deploy**! The most valuable contributions are new OS options, fixes for resolvers whose upstream layout has changed, and bug fixes.
 
 ## Adding a new OS option
 
-All OS definitions are in the `case "$OS_CHOICE" in` block of `create-instant-vm.sh`.
+OS options are discovered at runtime, not hard-coded. Each one is a **resolver function** plus a line in the `OS_MENU` array, both in the "Image discovery" section of `create-instant-vm.sh`.
 
-1. **Add a menu entry** with the next free number:
+1. **Add a menu entry** at the **end** of `OS_MENU`. The menu number is the array position, so adding to the end keeps every existing `OS_CHOICE` number working:
    ```bash
-   echo "  [11] openSUSE Leap 15.6"
+   OS_MENU=(
+       ...
+       "mydistro|MyDistro (newest)"
+   )
    ```
-   Then update the prompt range (`Select OS (1-11)`).
 
-2. **Add a `case` branch** that sets at least `IMG_NAME` and `IMG_URL`:
-   ```bash
-   11)
-       IMG_NAME="openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2"
-       IMG_URL="https://download.opensuse.org/distribution/leap/15.6/appliances/${IMG_NAME}"
-       ;;
-   ```
-   Optional variables:
+2. **Write `resolve_<id>()`**, with dashes in the id replaced by underscores (`debian-stable` → `resolve_debian_stable`). It must find the **newest** release from the distro's own metadata or directory listing, and set:
 
-   | Variable | Values | When to set it |
+   | Variable | Required | Meaning |
    |---|---|---|
-   | `BOOT_TYPE` | `bios` (default) / `uefi` | The image only boots with UEFI. |
-   | `OS_TYPE` | `standard` (default) / `nixos` / `omarchy` / *new* | The OS needs its own customization path. |
-   | `MEMORY`, `DISK_SIZE` | e.g. `4096`, `32G` | The OS needs more than the defaults. Only raise values the user didn't override (see the Omarchy branch). |
+   | `IMG_URL` | yes | Direct URL of a **dated/versioned** file. Avoid moving aliases like `latest`, so the checksum and cache name match what was downloaded. |
+   | `IMG_NAME` | yes | Versioned cache filename, e.g. `fedora-44-1.7.qcow2`. A new release then gets a new name and is downloaded fresh. |
+   | `OS_LABEL` | yes | Human-readable name including the resolved version. |
+   | `SUM_URL` | strongly recommended | The checksum file for `IMG_URL`. GNU (`hash  name`), BSD (`SHA256 (name) = hash`) and bare-hash formats are parsed automatically, SHA256 or SHA512. |
+   | `BOOT_TYPE` | optional | `bios` (default) / `uefi`. |
+   | `OS_TYPE` | optional | `standard` (default) / `nixos` / `omarchy` / *new*. |
 
-3. **Pick a stable image URL.** Prefer official mirrors and "latest" or "current" symlinks over date-stamped files. If the filename has to be discovered at runtime (see NixOS), fail with a clear error when discovery returns nothing.
+   Use the helpers `fetch` (curl with timeouts and retries), `url_ok` (does the URL really serve a file?), `hrefs '<regex>'` (links from a directory listing) and `newest` (version sort). Return non-zero when nothing is found. `resolve_fedora` and `resolve_rocky` are good, tested templates. The shape is:
 
-4. **Customization.** The `standard` path creates the user (falling back from `sudo,adm` to `wheel`), sets passwords, and enables SSH password login. That's enough for most cloud images. If your OS needs something different, add a new `OS_TYPE` branch in the "Baking credentials" section. Keep the changes **idempotent**, and remember that `virt-customize --run-command` runs inside the guest image.
+   ```bash
+   # Template: replace the URL and regexes with the distro's real layout.
+   resolve_mydistro() {
+       local base="https://mirror.example.org/mydistro/" v file
+       # Walk from the newest version down until one actually has a cloud image.
+       while read -r v; do
+           [[ -z "$v" ]] && continue
+           file=$(fetch "${base}${v}/cloud/" 2>/dev/null \
+               | grep -oE "mydistro-${v}-[0-9.]+-x86_64\.qcow2" | newest)
+           [[ -z "$file" ]] && continue
+           IMG_URL="${base}${v}/cloud/${file}"
+           SUM_URL="${base}${v}/cloud/SHA256SUMS"
+           IMG_NAME="${file}"
+           OS_LABEL="MyDistro ${v}"
+           return 0
+       done < <(fetch "$base" | hrefs '[0-9]+/' | tr -d / | sort -rn | sed -n '1,3p')
+       return 1
+   }
+   ```
 
-5. **Cloud-init.** If the image doesn't support cloud-init (like NixOS), exclude it in the `if [[ "$OS_TYPE" != "nixos" ]]` block.
+   Check what your mirror's listing really looks like first (`curl -s <dir> | grep -o 'href="[^"]*"'`). Some use `href="./16.0/"` instead of `href="16.0/"`, and legacy version numbers can sort above the current one.
 
-6. **Docs.** Add a row to the *Supported operating systems* table in `README.md`. Add a "How X works" section if it behaves differently.
+   Rules of thumb:
+   - **Walk down, don't assume.** The newest release dir often exists before its cloud image does (Fedora 42 never had one). Try the newest few candidates and take the first that has an image.
+   - **No version numbers in code.** If you find yourself typing `44` or `trixie`, read it from upstream metadata instead.
+   - **Keep it quick.** A resolver should take a few HTTP requests. `--list` and `--check` run every resolver.
+   - Prefer listings via `sed -n '1,Np'` over `head -n N` when reading from `curl`, so curl doesn't print "Failure writing output" errors.
+
+3. **Customization.** The `standard` path creates the user (falling back from `sudo,adm` to `wheel`), sets passwords, and enables SSH password login. That's enough for most cloud images. If your OS needs something different, add a new `OS_TYPE` branch in the "Baking credentials" section. Keep the changes **idempotent**. `virt-customize --run-command` runs inside the guest image and needs an image that libguestfs' OS inspection recognises. If it doesn't (like NixOS, which has no `/etc` until first boot), use `guestfish` the way `customize_nixos` does, and read the result back before caching it.
+
+4. **Cloud-init.** If the image doesn't support cloud-init (like NixOS), exclude it in the `if [[ "$OS_TYPE" != "nixos" ]]` block.
+
+5. **Docs.** Add rows to the *Supported operating systems* and *Automatic version discovery* tables in `README.md`. Add a "How X works" section if it behaves differently.
 
 ## Testing locally
 
@@ -44,15 +70,18 @@ You need a **Proxmox VE test node**, ideally a nested PVE VM or a spare host. Do
 bash -n create-instant-vm.sh
 shellcheck create-instant-vm.sh
 
-# 2. Use a throwaway cache so you start fresh
-CACHE_DIR=/tmp/qd-test OS_CHOICE=11 ./create-instant-vm.sh
+# 2. Check every resolver finds an image (no root/Proxmox needed)
+./create-instant-vm.sh --list
 
-# 3. Verify the VM
+# 3. Use a throwaway cache so you start fresh
+CACHE_DIR=/tmp/qd-test OS_CHOICE=<your-id> ./create-instant-vm.sh
+
+# 4. Verify the VM
 qm terminal <vmid>                         # serial console login
 qm guest cmd <vmid> network-get-interfaces # guest agent + IP
 ssh admin@<ip>                             # password login
 
-# 4. Clean up
+# 5. Clean up
 qm stop <vmid> && qm destroy <vmid> --purge
 rm -rf /tmp/qd-test
 ```
@@ -61,10 +90,11 @@ Checklist before you open a PR:
 
 - [ ] `shellcheck` passes with no new warnings.
 - [ ] A fresh run (empty cache) and a cached run both work.
-- [ ] You can log in as both `DEFAULT_USER` and `root`, on the console and over SSH.
+- [ ] You can log in as both `DEFAULT_USER` and `root`, on the console and over SSH (NixOS: root by console only).
 - [ ] `CACHE_DIR` auto-detection still works when it's unset (check the "Image cache" line from `--check`).
 - [ ] Nothing is installed, downloaded or created before the user confirms. Anything new that changes the host must appear in the `--check` report and the deployment plan.
-- [ ] Existing OS options are unaffected. Re-test at least one, such as Debian 12.
+- [ ] `./create-instant-vm.sh --list` resolves every entry, and the new image's checksum is verified on download (`[ok] SHA… checksum verified`).
+- [ ] Existing OS options are unaffected. Re-test at least one, such as `debian-stable`.
 
 ## Testing storage detection without Proxmox
 
