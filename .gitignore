@@ -1,0 +1,11 @@
+# Downloaded and customized cloud images
+*.qcow2
+*.img
+*.part
+ready-*
+cloud-images/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
