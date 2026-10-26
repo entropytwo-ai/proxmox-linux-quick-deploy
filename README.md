@@ -4,6 +4,16 @@
 
 `create-instant-vm.sh` turns "I need a fresh Linux VM" into a single menu choice. No ISO installers, no clicking through wizards: the VM boots straight into a working system with a user account, a password, and SSH you can log in to right away.
 
+## 🚀 One-line install
+
+Run this as root in your Proxmox VE shell:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/proxmox-linux-quick-deploy/main/create-instant-vm.sh)
+```
+
+It asks before installing anything on the host and shows the full plan before anything is downloaded or created. Add `--check` to the end for a dry run that changes nothing. More options are in [Quick start](#quick-start).
+
 ---
 
 ## Table of Contents
@@ -11,6 +21,7 @@
 - [What it does](#what-it-does)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
+- [What the script changes on your host](#what-the-script-changes-on-your-host)
 - [Supported operating systems](#supported-operating-systems)
 - [Configuration](#configuration)
 - [Storage auto-detection](#storage-auto-detection)
@@ -26,11 +37,12 @@
 ## What it does
 
 1. **Finds a cache directory** for cloud images by asking Proxmox (`pvesm`) where your file-based storage lives. See [Storage auto-detection](#storage-auto-detection).
-2. **Installs `libguestfs-tools`** the first time, then checks that `virt-customize` really works (not just that the binary exists). If it doesn't, it runs `update-guestfs-appliance` and stops with a clear error if that doesn't fix it.
-3. **Downloads the official cloud image** for the OS you pick. This happens once per OS and is cached.
-4. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize`: root password, a sudo user, SSH password login enabled. This also happens once per OS and is cached.
-5. **Creates the VM** with the next free VMID and a unique name (`Linux-New-1`, `Linux-New-2`, …), VirtIO SCSI + iothread, QEMU guest agent, serial console, and cloud-init (except NixOS).
-6. **Imports and resizes the disk**, then **starts the VM**.
+2. **Checks for host software** (`libguestfs-tools`, `wget`, `curl`). If any is missing it shows exactly what `apt-get` would install, including dependencies and disk usage, and **asks before installing**. After installing, it boots the libguestfs appliance once to prove `virt-customize` really works. If it doesn't, it **asks** before running `update-guestfs-appliance`.
+3. **Shows the full deployment plan** and asks you to confirm: where images will be downloaded and cached, which Proxmox storage will hold the VM disks (with free space), the bridge, VMID, name and resources. See [What the script changes on your host](#what-the-script-changes-on-your-host).
+4. **Downloads the official cloud image** for the OS you pick. This happens once per OS and is cached.
+5. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize`: root password, a sudo user, SSH password login enabled. This also happens once per OS and is cached.
+6. **Creates the VM** with the next free VMID and a unique name (`Linux-New-1`, `Linux-New-2`, …), VirtIO SCSI + iothread, QEMU guest agent, serial console, and cloud-init (except NixOS).
+7. **Imports and resizes the disk**, then **starts the VM**.
 
 Once both images are cached, a new VM is usually ready in seconds.
 
@@ -47,7 +59,13 @@ Once both images are cached, a new VM is usually ready in seconds.
 
 ## Quick start
 
-Run this on your Proxmox host as root:
+Run this on your Proxmox host as root. Start with a **dry run** to see what's installed, what would be installed, and where images and VM disks will go. It changes nothing:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/proxmox-linux-quick-deploy/main/create-instant-vm.sh) --check
+```
+
+Then run it for real. You'll be asked before any software is installed and again before anything is downloaded or created:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/proxmox-linux-quick-deploy/main/create-instant-vm.sh)
@@ -62,23 +80,66 @@ chmod +x create-instant-vm.sh
 ./create-instant-vm.sh
 ```
 
-Non-interactive, with custom settings:
+Non-interactive, with custom settings. `--yes` is required when there's no terminal to answer prompts, and it approves both the package install and the plan:
 
 ```bash
 OS_CHOICE=3 MEMORY=4096 CORES=4 DISK_SIZE=40G \
-DEFAULT_USER=alice DEFAULT_PASS='S3cure!' ./create-instant-vm.sh
+DEFAULT_USER=alice DEFAULT_PASS='S3cure!' ./create-instant-vm.sh --yes
 ```
 
-Example output:
+### Command-line options
+
+| Option | Effect |
+|---|---|
+| `-c`, `--check` | Dry run. Reports Proxmox/root status, which host packages are present or missing, the exact `apt-get` command and what it would pull in, the image cache path (and free space), the VM disk storage, the bridge, and any already-cached images. Also boots the libguestfs appliance to confirm `virt-customize` works. Changes nothing. Exit code `0` = ready, `1` = action needed. |
+| `-y`, `--yes` | Auto-confirm all prompts (same as `ASSUME_YES=1`). |
+| `-h`, `--help` | Show usage. |
+
+## What the script changes on your host
+
+Nothing happens behind your back. Every change to the hypervisor is announced first:
+
+| Change | When | Asks first? |
+|---|---|---|
+| `apt-get update` + `apt-get install -y libguestfs-tools` (and `wget`/`curl` if missing) | Only if something is missing | **Yes**, default **No**. Shows the package list (including dependencies) and download/disk size. If you decline, it prints the manual command and exits. |
+| `update-guestfs-appliance` | Only if `virt-customize` doesn't work | **Yes** |
+| Create the image cache directory | First run | Shown in the plan |
+| Download the cloud image into the cache | Once per OS | Shown in the plan (URL → path) |
+| Write a customized `ready-*` image into the cache | Once per OS | Shown in the plan |
+| Create, import the disk into, and start a VM | Every run | Shown in the plan (VMID, name, storage, bridge, resources) |
+
+If there's no terminal (e.g. run from cron or a pipe) and `--yes` isn't given, the script **refuses** to install or create anything rather than assuming consent.
+
+Example plan shown before anything is downloaded:
 
 ```
-[*] Detected Proxmox storage 'local' (content: iso) at /var/lib/vz
-[*] Using cloud image cache: /var/lib/vz/cloud-images
-=== Instant Proxmox VM Creator (Guaranteed Login!) ===
-...
-✅ Success! Linux-New-1 (ID: 105) is booting!
-👤 Login as : admin  (or 'root')
-🔑 Password : password123
+==================================================================
+ Deployment plan: Debian 12 (Bookworm)
+==================================================================
+Where things will go:
+  Image cache (downloads + customized images):
+    /var/lib/vz/cloud-images
+    (auto-detected from Proxmox storage 'local' (content: iso))
+    exists, 61.2 GiB free
+  VM disks / EFI disk / cloud-init drive:
+    Proxmox storage 'local-lvm' (type: lvmthin, 180.4 GiB available)
+    (first active storage with 'images' content)
+  Network bridge: vmbr0 (first Linux bridge)
+
+Cloud image:
+  [download] https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+          -> /var/lib/vz/cloud-images/debian-12-generic-amd64.qcow2
+  [create]   customized image: /var/lib/vz/cloud-images/ready-debian-12-generic-amd64.qcow2
+
+New VM:
+  ID / name : 105 / Linux-New-1
+  Resources : 2 cores, 2048 MiB RAM, 20G disk on 'local-lvm'
+  Boot      : bios
+  Cloud-init: drive on 'local-lvm', DHCP on vmbr0
+  Login     : admin / root, password 'password123'
+  Starts automatically after creation.
+==================================================================
+Proceed with this plan? [Y/n]
 ```
 
 ## Supported operating systems
@@ -111,6 +172,7 @@ Every variable can be set in the environment before you run the script, or edite
 | `DEFAULT_USER` | `admin` | Sudo user created in the image. |
 | `DEFAULT_PASS` | `password123` | Password for `DEFAULT_USER` and `root`. **Change it.** |
 | `OS_CHOICE` | *(interactive)* | `1`–`10`. Skips the menu. |
+| `ASSUME_YES` | `0` | `1` auto-confirms all prompts (same as `--yes`). |
 | `STORAGE_CFG` | `/etc/pve/storage.cfg` | Proxmox storage config file to read (mostly useful for testing). |
 
 ## Storage auto-detection
@@ -203,7 +265,7 @@ rm -f "$CACHE_DIR"/ready-*
 <details>
 <summary><b>The cache ended up in the wrong place</b></summary>
 
-The path being used is printed at startup (`[*] Using cloud image cache: …`). Override it with `CACHE_DIR=/your/path`. To see what the script can detect:
+The path is shown in the deployment plan before anything happens, and by `./create-instant-vm.sh --check`. Override it with `CACHE_DIR=/your/path`. To see what the script can detect:
 
 ```bash
 pvesm status -content images
