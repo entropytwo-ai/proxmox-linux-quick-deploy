@@ -24,15 +24,17 @@ DEFAULT_PASS="${DEFAULT_PASS:-password123}"
 FALLBACK_CACHE_DIR="/var/lib/vz/template/iso/cloud-images"
 STORAGE_CFG="${STORAGE_CFG:-/etc/pve/storage.cfg}"
 ASSUME_YES="${ASSUME_YES:-0}"
+CUSTOM_IMG_URL="${IMG_URL:-}"
 # CACHE_DIR    : where cloud images are cached (auto-detected if unset)
 # VM_STORAGE   : Proxmox storage for VM disks (auto-detected if unset)
 # BRIDGE       : network bridge (auto-detected if unset, defaults to vmbr0)
-# OS_CHOICE    : 1-10 to skip the interactive menu
+# OS_CHOICE    : menu number or id (e.g. 'debian-stable') to skip the menu
+# IMG_URL      : custom image URL — skips version discovery
 # ASSUME_YES   : 1 to answer "yes" to every confirmation (same as --yes)
 # -----------------------------------------------------------------------
 
 # Host packages this script may install, as "command:package" pairs.
-REQUIRED_PKGS=("virt-customize:libguestfs-tools" "wget:wget" "curl:curl")
+REQUIRED_PKGS=("virt-customize:libguestfs-tools" "guestfish:libguestfs-tools" "wget:wget" "curl:curl" "openssl:openssl")
 
 usage() {
     cat <<USAGE
@@ -44,19 +46,29 @@ Options:
   -c, --check   Dry run: report what is installed, what would be installed,
                 where images are cached and where VM disks will go. Changes
                 nothing on the host and exits (0 = ready, 1 = action needed).
+  -l, --list    Look up the newest image of every supported distro (live,
+                from the official mirrors) and print versions + URLs. Needs
+                only curl; changes nothing.
   -y, --yes     Don't ask for confirmation (package install + VM creation).
                 Required when no terminal is available.
   -h, --help    Show this help.
 
-Environment overrides: CACHE_DIR VM_STORAGE BRIDGE OS_CHOICE DISK_SIZE
-MEMORY CORES DEFAULT_USER DEFAULT_PASS ASSUME_YES
+Images are discovered at runtime: the script always offers the newest
+release each distro publishes, so new versions appear without an update.
+
+Environment overrides: CACHE_DIR VM_STORAGE BRIDGE OS_CHOICE (number or id,
+e.g. 'fedora') DISK_SIZE MEMORY CORES DEFAULT_USER DEFAULT_PASS ASSUME_YES
+IMG_URL (skip discovery and use this image; OS_CHOICE picks how it is
+customized)
 USAGE
 }
 
 CHECK_ONLY=0
+LIST_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--check) CHECK_ONLY=1 ;;
+        -l|--list)  LIST_ONLY=1 ;;
         -y|--yes)   ASSUME_YES=1 ;;
         -h|--help)  usage; exit 0 ;;
         *) echo "[!] Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -127,6 +139,313 @@ guestfs_runtime_ok() {
     command -v libguestfs-test-tool &>/dev/null || return 1
     libguestfs-test-tool -t 180 &>/dev/null
 }
+
+# =====================================================================
+# --- Image discovery: find the newest release of each distro at runtime ---
+# =====================================================================
+# Nothing below hard-codes a version number. Each resolver reads the distro's
+# own release metadata or directory listing, walks from the newest release
+# down until it finds one that actually has a cloud image, and sets:
+#   OS_LABEL  human readable name incl. resolved version
+#   IMG_URL   direct download URL (a dated/versioned file, not a moving alias)
+#   IMG_NAME  versioned cache filename, so a new release is downloaded fresh
+#   SUM_URL   checksum file for IMG_URL (verified after download)
+#   OS_TYPE   standard | omarchy | nixos      BOOT_TYPE  bios | uefi
+# To add a distro: write resolve_<id>() and add a line to OS_MENU.
+
+# "id|menu label" — menu numbers are the array position (+1); append new
+# entries at the end so existing OS_CHOICE numbers keep working.
+OS_MENU=(
+    "ubuntu-lts|Ubuntu LTS (newest)"
+    "ubuntu-dev|Ubuntu development daily (next release)"
+    "debian-stable|Debian stable (newest)"
+    "debian-testing|Debian testing daily (next release)"
+    "fedora|Fedora Cloud (newest)"
+    "arch|Arch Linux (rolling)"
+    "omarchy|Omarchy (Arch + Omarchy installer)"
+    "nixos|NixOS unstable"
+    "rocky|Rocky Linux (newest, RHEL clone)"
+    "alpine|Alpine Linux (newest stable, ultra-lightweight)"
+    "ubuntu-latest|Ubuntu newest release (incl. interim)"
+    "debian-oldstable|Debian oldstable"
+)
+
+fetch()  { curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 "$1"; }
+url_ok() { curl -fsL  --connect-timeout 10 --max-time 30 --retry 1 -r 0-0 -o /dev/null "$1"; }
+newest() { sort -uV | tail -n 1; }   # newest line by version sort
+# Extract hrefs matching a regex from a directory listing.
+hrefs()  { grep -oE "href=\"$1\"" | sed -E 's/^href="//; s/"$//'; }
+
+reset_image() { OS_LABEL=""; IMG_URL=""; IMG_NAME=""; SUM_URL=""; OS_TYPE="standard"; BOOT_TYPE="bios"; }
+
+# Ubuntu: Canonical's release-upgrader metadata lists every release with its
+# codename; cloud images live under /<codename>/<serial>/.  $1 = lts|latest|dev
+resolve_ubuntu_kind() {
+    local kind="$1" meta="https://changelogs.ubuntu.com/meta-release" list c v lts serial
+    [[ "$kind" == "dev" ]] && meta+="-development"
+    list=$(fetch "$meta" | awk '/^Dist:/{d=$2} /^Version:/{lts=($0 ~ /LTS/); split($2,p,"."); if (d!="") print d, p[1]"."p[2], lts; d=""}') || return 1
+    [[ "$kind" == "lts" ]] && list=$(awk '$3==1' <<<"$list")
+    [[ "$kind" == "dev" ]] && list=$(tail -n 1 <<<"$list")
+    while read -r c v lts; do
+        [[ -z "$c" ]] && continue
+        serial=$(fetch "https://cloud-images.ubuntu.com/${c}/" 2>/dev/null | hrefs '[0-9]{8}(\.[0-9]+)?/' | tr -d / | newest)
+        [[ -z "$serial" ]] && continue
+        IMG_URL="https://cloud-images.ubuntu.com/${c}/${serial}/${c}-server-cloudimg-amd64.img"
+        url_ok "$IMG_URL" || continue
+        SUM_URL="https://cloud-images.ubuntu.com/${c}/${serial}/SHA256SUMS"
+        IMG_NAME="ubuntu-${v}-${c}-${serial}.qcow2"
+        OS_LABEL="Ubuntu ${v}$([[ "$lts" == 1 ]] && echo " LTS") (${c^}, build ${serial})"
+        [[ "$kind" == "dev" ]] && OS_LABEL+=" — development daily"
+        return 0
+    done < <(tac <<<"$list")
+    return 1
+}
+resolve_ubuntu_lts()    { resolve_ubuntu_kind lts; }
+resolve_ubuntu_latest() { resolve_ubuntu_kind latest; }
+resolve_ubuntu_dev()    { resolve_ubuntu_kind dev; }
+
+# Debian: the archive's suite alias (stable/testing/...) gives the codename;
+# cloud.debian.org has dated build dirs per codename.  $1 = suite
+resolve_debian_suite() {
+    local suite="$1" codename base serial file n
+    codename=$(fetch "https://deb.debian.org/debian/dists/${suite}/Release" | awk '/^Codename:/ && !c {print $2; c=1}') || return 1
+    [[ -z "$codename" ]] && return 1
+    base="https://cloud.debian.org/images/cloud/${codename}/"
+    [[ "$suite" == "testing" ]] && base+="daily/"
+    while read -r serial; do
+        [[ -z "$serial" ]] && continue
+        file=$(fetch "${base}${serial}/" 2>/dev/null | grep -oE "debian-[0-9]+-generic-amd64(-daily)?-${serial}\.qcow2" | head -n 1)
+        [[ -z "$file" ]] && continue
+        n=$(sed -E 's/^debian-([0-9]+)-.*/\1/' <<<"$file")
+        IMG_URL="${base}${serial}/${file}"
+        SUM_URL="${base}${serial}/SHA512SUMS"
+        IMG_NAME="debian-${n}-${codename}-${serial}.qcow2"
+        OS_LABEL="Debian ${n} (${codename^}, ${suite}, build ${serial})"
+        return 0
+    done < <(fetch "$base" | hrefs '[0-9]{8}-[0-9]+/' | tr -d / | sort -uV | tac | sed -n '1,5p')
+    return 1
+}
+resolve_debian_stable()    { resolve_debian_suite stable; }
+resolve_debian_testing()   { resolve_debian_suite testing; }
+resolve_debian_oldstable() { resolve_debian_suite oldstable; }
+
+# Fedora: newest numbered release that actually ships a Cloud Generic image
+# (not every release dir has one, e.g. while a release is being composed).
+resolve_fedora() {
+    local base="https://dl.fedoraproject.org/pub/fedora/linux/releases/" n dir file build
+    while read -r n; do
+        [[ -z "$n" ]] && continue
+        dir="${base}${n}/Cloud/x86_64/images/"
+        file=$(fetch "$dir" 2>/dev/null | grep -oE "Fedora-Cloud-Base-Generic-${n}-[0-9.]+\.x86_64\.qcow2" | newest)
+        [[ -z "$file" ]] && continue
+        build="${file#Fedora-Cloud-Base-Generic-"${n}"-}"; build="${build%.x86_64.qcow2}"
+        # Prefer the mirror network, fall back to the master server.
+        IMG_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/${n}/Cloud/x86_64/images/${file}"
+        url_ok "$IMG_URL" || IMG_URL="${dir}${file}"
+        SUM_URL="${dir}Fedora-Cloud-${n}-${build}-x86_64-CHECKSUM"
+        IMG_NAME="fedora-${n}-${build}.qcow2"
+        OS_LABEL="Fedora ${n} Cloud (build ${build})"
+        return 0
+    done < <(fetch "$base" | hrefs '[0-9]+/' | tr -d / | sort -rn | sed -n '1,4p')
+    return 1
+}
+
+# Arch: the 'latest' dir holds a dated image next to the moving alias.
+resolve_arch() {
+    local dir="https://geo.mirror.pkgbuild.com/images/latest/" file ver
+    file=$(fetch "$dir" | grep -oE 'Arch-Linux-x86_64-cloudimg-[0-9.]+\.qcow2' | newest) || return 1
+    [[ -z "$file" ]] && return 1
+    ver="${file#Arch-Linux-x86_64-cloudimg-}"; ver="${ver%.qcow2}"
+    IMG_URL="${dir}${file}"
+    SUM_URL="${IMG_URL}.SHA256"
+    IMG_NAME="arch-${ver}.qcow2"
+    OS_LABEL="Arch Linux (build ${ver})"
+}
+resolve_omarchy() {
+    resolve_arch || return 1
+    OS_LABEL="Omarchy on ${OS_LABEL}"
+    OS_TYPE="omarchy"
+}
+
+# NixOS: newest build of the linuxcontainers.org VM image.
+resolve_nixos() {
+    local base="https://images.linuxcontainers.org/images/nixos/unstable/amd64/default/" build stamp
+    build=$(fetch "$base" | grep -oE '[0-9]{8}_[0-9]{2}(%3A|:)[0-9]{2}/' | sort -u | tail -n 1) || return 1
+    [[ -z "$build" ]] && return 1
+    stamp=$(sed -E 's/(%3A|:)//; s#/$##' <<<"$build")
+    IMG_URL="${base}${build}disk.qcow2"
+    SUM_URL="${base}${build}SHA256SUMS"
+    IMG_NAME="nixos-unstable-${stamp}.qcow2"
+    OS_LABEL="NixOS unstable (build ${stamp})"
+    OS_TYPE="nixos"
+    BOOT_TYPE="uefi"
+}
+
+# Rocky: newest major version dir that has a versioned GenericCloud image.
+resolve_rocky() {
+    local base="https://dl.rockylinux.org/pub/rocky/" n dir file ver
+    while read -r n; do
+        [[ -z "$n" ]] && continue
+        dir="${base}${n}/images/x86_64/"
+        file=$(fetch "$dir" 2>/dev/null | grep -oE "Rocky-${n}-GenericCloud(-Base)?-${n}\.[0-9]+-[0-9.]+\.x86_64\.qcow2" | newest)
+        [[ -z "$file" ]] && continue
+        ver=$(sed -E "s/^Rocky-${n}-GenericCloud(-Base)?-//; s/\.x86_64\.qcow2$//" <<<"$file")
+        IMG_URL="${dir}${file}"
+        SUM_URL="${IMG_URL}.CHECKSUM"
+        IMG_NAME="rocky-${ver}.qcow2"
+        OS_LABEL="Rocky Linux ${ver%%-*} (build ${ver#*-})"
+        return 0
+    done < <(fetch "$base" | hrefs '[0-9]+/' | tr -d / | sort -rn | sed -n '1,3p')
+    return 1
+}
+
+# Alpine: the latest-stable alias always points to the newest stable branch.
+resolve_alpine() {
+    local dir="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud/" file ver
+    file=$(fetch "$dir" | grep -oE 'generic_alpine-[0-9.]+-x86_64-bios-cloudinit-r[0-9]+\.qcow2' | newest) || return 1
+    [[ -z "$file" ]] && return 1
+    ver=$(sed -E 's/^generic_alpine-([0-9.]+)-x86_64-bios-cloudinit-(r[0-9]+)\.qcow2$/\1-\2/' <<<"$file")
+    IMG_URL="${dir}${file}"
+    SUM_URL="${IMG_URL}.sha512"
+    IMG_NAME="alpine-${ver}.qcow2"
+    OS_LABEL="Alpine Linux ${ver%-r*}"
+}
+
+# Map a menu number or id to an id (empty if unknown).
+os_id_for() {
+    local choice="$1" i entry
+    for i in "${!OS_MENU[@]}"; do
+        entry="${OS_MENU[$i]%%|*}"
+        if [[ "$choice" == "$((i + 1))" || "$choice" == "$entry" ]]; then echo "$entry"; return; fi
+    done
+}
+
+# Run the resolver for an id; leaves the result in the globals above.
+resolve_os() {
+    reset_image
+    "resolve_${1//-/_}" && [[ -n "$IMG_URL" && -n "$IMG_NAME" ]]
+}
+
+# Print the resolved image for every menu entry (used by --list and --check).
+print_image_sources() {
+    local i id rc=0
+    for i in "${!OS_MENU[@]}"; do
+        id="${OS_MENU[$i]%%|*}"
+        if resolve_os "$id" 2>/dev/null; then
+            printf '  [%2d] %-16s %s\n       %s\n' "$((i + 1))" "$id" "$OS_LABEL" "$IMG_URL"
+        else
+            printf '  [%2d] %-16s [!] could not determine the newest image (network/mirror issue?)\n' "$((i + 1))" "$id"
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# Expected hash for a file from a checksum file in any common format:
+# GNU ("hash  name" / "hash *name"), BSD ("SHA256 (name) = hash") or bare hash.
+expected_hash() {
+    local sums="$1" name="$2" h
+    h=$(awk -v n="$name" '{
+            ok = 0
+            for (i = 1; i <= NF; i++) { t = $i; gsub(/^[*(]|[)]$/, "", t); if (t == n) ok = 1 }
+            if (ok) for (i = 1; i <= NF; i++)
+                if ($i ~ /^[0-9a-fA-F]+$/ && (length($i) == 64 || length($i) == 128)) { print tolower($i); exit }
+        }' <<<"$sums")
+    if [[ -z "$h" && $(wc -w <<<"$sums") -eq 1 ]] && [[ "$sums" =~ ^[0-9a-fA-F]{64}([0-9a-fA-F]{64})?$ ]]; then
+        h="${sums,,}"
+    fi
+    echo "$h"
+}
+
+# Verify a downloaded file against SUM_URL. Returns 1 only on a real mismatch;
+# a missing/unreadable checksum file is reported but not fatal.
+verify_download() {
+    local file="$1" name sums expected actual
+    if [[ -z "$SUM_URL" ]]; then echo "    [!] no checksum published — skipping verification"; return 0; fi
+    name=$(basename "$IMG_URL")
+    if ! sums=$(fetch "$SUM_URL"); then
+        echo "    [!] could not fetch $SUM_URL — skipping verification"; return 0
+    fi
+    expected=$(expected_hash "$sums" "$name")
+    if [[ -z "$expected" ]]; then
+        echo "    [!] $name not listed in $SUM_URL — skipping verification"; return 0
+    fi
+    if [[ ${#expected} -eq 128 ]]; then actual=$(sha512sum "$file" | cut -d' ' -f1)
+    else actual=$(sha256sum "$file" | cut -d' ' -f1); fi
+    if [[ "$actual" != "$expected" ]]; then
+        echo "    [!] CHECKSUM MISMATCH for $name" >&2
+        echo "        expected $expected" >&2
+        echo "        got      $actual" >&2
+        return 1
+    fi
+    echo "    [ok] SHA$([[ ${#expected} -eq 128 ]] && echo 512 || echo 256) checksum verified"
+}
+
+# NixOS VM images boot a unified kernel image; the ext4 root holds only
+# /nix/store (no /etc), so virt-customize's OS inspection cannot work. Instead
+# pre-seed /etc/passwd, /etc/group and /etc/shadow with guestfish: with NixOS'
+# default mutableUsers=true, first-boot activation keeps these entries and
+# merges the declared system users in. Also adds DHCP for any NIC name (the
+# upstream image only matches Incus' enp5s0).
+nixos_root_fs() {
+    local img="$1" dev fstype
+    while IFS=': ' read -r dev fstype; do
+        [[ "$fstype" =~ ^(ext4|btrfs|xfs)$ ]] || continue
+        if [[ "$(guestfish --ro -a "$img" run : mount-ro "$dev" / : is-dir /nix/store 2>/dev/null)" == "true" ]]; then
+            echo "$dev"; return 0
+        fi
+    done < <(guestfish --ro -a "$img" run : list-filesystems 2>/dev/null)
+    return 1
+}
+
+customize_nixos() {
+    local img="$1" rootdev tmp check rc=0
+    if ! rootdev=$(nixos_root_fs "$img"); then
+        echo "[!] Could not find the NixOS root filesystem (/nix/store) in $img" >&2
+        return 1
+    fi
+    tmp=$(mktemp -d)
+    printf 'root:x:0:0:System administrator:/root:/run/current-system/sw/bin/bash\n%s:x:1000:100::/home/%s:/run/current-system/sw/bin/bash\n' \
+        "$DEFAULT_USER" "$DEFAULT_USER" > "$tmp/passwd"
+    printf 'root:x:0:\nwheel:x:1:%s\nusers:x:100:\n' "$DEFAULT_USER" > "$tmp/group"
+    printf 'root:%s:1::::::\n%s:%s:1::::::\n' \
+        "$(openssl passwd -6 "$DEFAULT_PASS")" "$DEFAULT_USER" "$(openssl passwd -6 "$DEFAULT_PASS")" > "$tmp/shadow"
+    printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=true\n' > "$tmp/90-proxmox-dhcp.network"
+
+    guestfish --rw -a "$img" <<GFEOF || rc=1
+run
+mount $rootdev /
+mkdir-p /etc/systemd/network
+upload $tmp/passwd /etc/passwd
+upload $tmp/group /etc/group
+upload $tmp/shadow /etc/shadow
+upload $tmp/90-proxmox-dhcp.network /etc/systemd/network/90-proxmox-dhcp.network
+chmod 0644 /etc/passwd
+chmod 0644 /etc/group
+chmod 0640 /etc/shadow
+chmod 0644 /etc/systemd/network/90-proxmox-dhcp.network
+mkdir-p /root
+chmod 0700 /root
+mkdir-p /home/$DEFAULT_USER
+chown 1000 100 /home/$DEFAULT_USER
+chmod 0700 /home/$DEFAULT_USER
+GFEOF
+    rm -rf "$tmp"
+    [[ "$rc" == 0 ]] || return 1
+    # Read the result back so a silently broken image is never cached.
+    check=$(guestfish --ro -a "$img" run : mount-ro "$rootdev" / : cat /etc/shadow 2>/dev/null || true)
+    if ! grep -qE "^${DEFAULT_USER}:[\$]6[\$]" <<<"$check" || ! grep -qE '^root:[$]6[$]' <<<"$check"; then
+        echo "[!] Verification failed: credentials not found in the customized NixOS image." >&2
+        return 1
+    fi
+}
+
+# --- --list: show what each menu entry resolves to right now, then exit ---
+if [[ "$LIST_ONLY" == "1" ]]; then
+    command -v curl &>/dev/null || { echo "[!] --list needs curl." >&2; exit 1; }
+    echo "Newest images available right now (looked up live):"
+    print_image_sources && exit 0 || exit 1
+fi
 
 # --- Pre-flight: environment ---
 PREFLIGHT_ERRORS=()
@@ -259,6 +578,13 @@ if [[ "$CHECK_ONLY" == "1" ]]; then
     echo
     print_locations
     [[ -z "$STORAGE" ]] && _rc=1
+    echo
+    echo "Image sources (newest releases, looked up live):"
+    if ! command -v curl &>/dev/null; then
+        echo "  (skipped — curl is not installed yet)"
+    elif ! print_image_sources; then
+        echo "  Some lookups failed; those entries would fail until the mirror is reachable."
+    fi
     if [[ -d "$CACHE_DIR" ]]; then
         echo
         echo "Already cached images in $CACHE_DIR:"
@@ -341,99 +667,52 @@ fi
 
 echo "=== Instant Proxmox VM Creator (Guaranteed Login!) ==="
 if [[ -z "${OS_CHOICE:-}" ]]; then
-    echo "Select an OS to deploy instantly:"
-    echo "  [1] Ubuntu 24.04 LTS (Noble)"
-    echo "  [2] Ubuntu 26.04 Daily (Resolute)"
-    echo "  [3] Debian 12 (Bookworm)"
-    echo "  [4] Debian 13 (Trixie)"
-    echo "  [5] Fedora 41 Cloud"
-    echo "  [6] Arch Linux"
-    echo "  [7] Omarchy (Arch + Omarchy Ready)"
-    echo "  [8] NixOS (Unstable VM)"
-    echo "  [9] Rocky Linux 9 (RHEL Clone)"
-    echo "  [10] Alpine Linux (Ultra-lightweight)"
+    echo "Select an OS to deploy instantly (the newest version is looked up live):"
+    for _i in "${!OS_MENU[@]}"; do
+        printf '  [%2d] %s\n' "$((_i + 1))" "${OS_MENU[$_i]#*|}"
+    done
     echo ""
     if { exec 3</dev/tty; } 2>/dev/null; then
-        read -r -u 3 -p "Select OS (1-10): " OS_CHOICE || true
+        read -r -u 3 -p "Select OS (1-${#OS_MENU[@]}): " OS_CHOICE || true
         exec 3<&-
     else
-        echo "[!] No terminal available. Set OS_CHOICE=1..10." >&2
+        echo "[!] No terminal available. Set OS_CHOICE=1..${#OS_MENU[@]} (or an id like 'fedora')." >&2
         exit 1
     fi
 fi
 
-BOOT_TYPE="bios"
-OS_TYPE="standard"
+OS_ID=$(os_id_for "$OS_CHOICE")
+if [[ -z "$OS_ID" ]]; then
+    echo "[!] Invalid choice: '$OS_CHOICE'" >&2
+    exit 1
+fi
 
-case "$OS_CHOICE" in
-    1)
-        OS_LABEL="Ubuntu 24.04 LTS (Noble)"
-        IMG_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
-        IMG_URL="https://cloud-images.ubuntu.com/noble/current/${IMG_NAME}"
-        ;;
-    2)
-        OS_LABEL="Ubuntu 26.04 Daily (Resolute)"
-        IMG_NAME="resolute-server-cloudimg-amd64.img"
-        IMG_URL="https://cloud-images.ubuntu.com/resolute/current/${IMG_NAME}"
-        ;;
-    3)
-        OS_LABEL="Debian 12 (Bookworm)"
-        IMG_NAME="debian-12-generic-amd64.qcow2"
-        IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/${IMG_NAME}"
-        ;;
-    4)
-        OS_LABEL="Debian 13 (Trixie)"
-        IMG_NAME="debian-13-generic-amd64.qcow2"
-        IMG_URL="https://cloud.debian.org/images/cloud/trixie/daily/latest/${IMG_NAME}"
-        ;;
-    5)
-        OS_LABEL="Fedora 41 Cloud"
-        IMG_NAME="Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
-        IMG_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/${IMG_NAME}"
-        ;;
-    6)
-        OS_LABEL="Arch Linux"
-        IMG_NAME="Arch-Linux-x86_64-cloudimg.qcow2"
-        IMG_URL="https://geo.mirror.pkgbuild.com/images/latest/${IMG_NAME}"
-        ;;
-    7)
-        OS_LABEL="Omarchy (Arch + Omarchy Ready)"
-        IMG_NAME="Arch-Linux-x86_64-cloudimg.qcow2"
-        IMG_URL="https://geo.mirror.pkgbuild.com/images/latest/${IMG_NAME}"
-        OS_TYPE="omarchy"
-        # Omarchy needs more headroom; only raise values the user didn't override.
-        if [[ "$MEMORY" -lt 4096 ]]; then MEMORY="4096"; fi
-        if [[ "$DISK_SIZE" == "20G" ]]; then DISK_SIZE="32G"; fi
-        ;;
-    8)
-        OS_LABEL="NixOS (Unstable VM)"
-        echo "[*] Finding latest NixOS qcow2 build..."
-        BASE_NIX_URL="https://images.linuxcontainers.org/images/nixos/unstable/amd64/default/"
-        LATEST_DIR=$(curl -fsSL "$BASE_NIX_URL" | grep -oE '[0-9]{8}_[0-9]{2}(%3A|:)[0-9]{2}/' | tail -n 1 || true)
-        if [[ -z "$LATEST_DIR" ]]; then
-            echo "[!] Could not determine the latest NixOS build from $BASE_NIX_URL" >&2
-            exit 1
-        fi
-        IMG_NAME="nixos-unstable-disk.qcow2"
-        IMG_URL="${BASE_NIX_URL}${LATEST_DIR}disk.qcow2"
-        OS_TYPE="nixos"
-        BOOT_TYPE="uefi"
-        ;;
-    9)
-        OS_LABEL="Rocky Linux 9"
-        IMG_NAME="Rocky-9-GenericCloud.latest.x86_64.qcow2"
-        IMG_URL="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/${IMG_NAME}"
-        ;;
-    10)
-        OS_LABEL="Alpine Linux 3.21"
-        IMG_NAME="generic_alpine-3.21.2-x86_64-bios-cloudinit-r0.qcow2"
-        IMG_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/${IMG_NAME}"
-        ;;
-    *)
-        echo "[!] Invalid choice: '$OS_CHOICE'" >&2
+if [[ -n "$CUSTOM_IMG_URL" ]]; then
+    # Custom image: no discovery; OS_CHOICE only decides how it is customized.
+    reset_image
+    IMG_URL="$CUSTOM_IMG_URL"
+    IMG_NAME="custom-$(basename "${IMG_URL%%\?*}")"
+    OS_LABEL="Custom image ($OS_ID customization)"
+    case "$OS_ID" in
+        omarchy) OS_TYPE="omarchy" ;;
+        nixos)   OS_TYPE="nixos"; BOOT_TYPE="uefi" ;;
+    esac
+else
+    echo "[*] Looking up the newest '$OS_ID' image..."
+    if ! resolve_os "$OS_ID"; then
+        echo "[!] Could not determine the newest '$OS_ID' image from its official mirror." >&2
+        echo "    Check this host's internet/DNS, try again later, or pin an image with" >&2
+        echo "    IMG_URL=<url> OS_CHOICE=$OS_ID $(basename "$0")" >&2
         exit 1
-        ;;
-esac
+    fi
+    echo "    Found: $OS_LABEL"
+fi
+
+if [[ "$OS_TYPE" == "omarchy" ]]; then
+    # Omarchy needs more headroom; only raise values the user didn't override.
+    if [[ "$MEMORY" -lt 4096 ]]; then MEMORY="4096"; fi
+    if [[ "$DISK_SIZE" == "20G" ]]; then DISK_SIZE="32G"; fi
+fi
 
 RAW_IMG_PATH="${CACHE_DIR}/${IMG_NAME}"
 if [[ "$OS_TYPE" == "omarchy" ]]; then
@@ -463,12 +742,17 @@ if [[ -f "$RAW_IMG_PATH" ]]; then
 else
     echo "  [download] $IMG_URL"
     echo "          -> $RAW_IMG_PATH"
+    [[ -n "$SUM_URL" ]] && echo "             verified against $SUM_URL"
 fi
 if [[ -f "$READY_IMG_PATH" ]]; then
     echo "  [cached]   customized image: $READY_IMG_PATH"
 else
     echo "  [create]   customized image: $READY_IMG_PATH"
-    echo "             (copy of the cloud image with credentials/SSH baked in via virt-customize)"
+    if [[ "$OS_TYPE" == "nixos" ]]; then
+        echo "             (copy of the cloud image with users/passwords + DHCP seeded via guestfish)"
+    else
+        echo "             (copy of the cloud image with credentials/SSH baked in via virt-customize)"
+    fi
 fi
 echo
 echo "New VM:"
@@ -481,6 +765,10 @@ else
     echo "  Network   : DHCP on $BRIDGE (NixOS native, no cloud-init drive)"
 fi
 echo "  Login     : $DEFAULT_USER / root, password '$DEFAULT_PASS'"
+if [[ "$OS_TYPE" == "nixos" ]]; then
+    echo "              (NixOS: root password works on the console; over SSH log in as"
+    echo "               '$DEFAULT_USER' and use sudo — NixOS refuses root password SSH)"
+fi
 echo "  Starts automatically after creation."
 echo "=================================================================="
 if ! confirm "Proceed with this plan?" y; then
@@ -499,6 +787,11 @@ if [[ ! -f "$RAW_IMG_PATH" ]]; then
         echo "[!] Download failed: $IMG_URL" >&2
         exit 1
     fi
+    if ! verify_download "${RAW_IMG_PATH}.part"; then
+        rm -f "${RAW_IMG_PATH}.part"
+        echo "[!] Downloaded image is corrupt or was tampered with — deleted. Try again." >&2
+        exit 1
+    fi
     mv "${RAW_IMG_PATH}.part" "$RAW_IMG_PATH"
 fi
 
@@ -510,32 +803,10 @@ if [[ ! -f "$READY_IMG_PATH" ]]; then
     trap 'rm -f "$WORK_IMG"' EXIT
 
     if [[ "$OS_TYPE" == "nixos" ]]; then
-        NIX_TMP=$(mktemp)
-        cat << NIXEOF > "$NIX_TMP"
-{ config, pkgs, ... }:
-{
-  users.users.root.initialPassword = "${DEFAULT_PASS}";
-  users.users.${DEFAULT_USER} = {
-    isNormalUser = true;
-    initialPassword = "${DEFAULT_PASS}";
-    extraGroups = [ "wheel" "networkmanager" ];
-  };
-  security.sudo.wheelNeedsPassword = false;
-  services.openssh = {
-    enable = true;
-    settings = {
-      PermitRootLogin = "yes";
-      PasswordAuthentication = true;
-    };
-  };
-  services.qemuGuest.enable = true;
-}
-NIXEOF
-        virt-customize -a "$WORK_IMG" \
-            --upload "${NIX_TMP}:/etc/nixos/proxmox-user.nix" \
-            --run-command "sed -i 's|imports = \[|imports = [ ./proxmox-user.nix |' /etc/nixos/configuration.nix" \
-            --root-password "password:${DEFAULT_PASS}"
-        rm -f "$NIX_TMP"
+        if ! customize_nixos "$WORK_IMG"; then
+            echo "[!] NixOS customization failed; nothing was cached." >&2
+            exit 1
+        fi
 
     elif [[ "$OS_TYPE" == "omarchy" ]]; then
         virt-customize -a "$WORK_IMG" \
@@ -563,6 +834,11 @@ else
     echo "[*] Using cached ready image: $READY_IMG_PATH"
 fi
 
+# The NixOS image ships no qemu-guest-agent; enabling the agent there would
+# make Proxmox shutdown/reboot wait for an agent that never answers.
+AGENT_ENABLED=1
+[[ "$OS_TYPE" == "nixos" ]] && AGENT_ENABLED=0
+
 echo "[*] Creating VM $VM_ID ($VM_NAME) on storage '$STORAGE' (bridge: $BRIDGE)..."
 
 qm create "$VM_ID" \
@@ -573,7 +849,7 @@ qm create "$VM_ID" \
     --cpu host \
     --net0 virtio,bridge="$BRIDGE" \
     --scsihw virtio-scsi-single \
-    --agent enabled=1 \
+    --agent enabled="$AGENT_ENABLED" \
     --serial0 socket
 
 if [[ "$BOOT_TYPE" == "uefi" ]]; then
@@ -599,6 +875,9 @@ qm start "$VM_ID"
 echo "===================================================="
 echo "✅ Success! $VM_NAME (ID: $VM_ID) is booting!"
 echo "👤 Login as : $DEFAULT_USER  (or 'root')"
+if [[ "$OS_TYPE" == "nixos" ]]; then
+    echo "   NixOS    : SSH as '$DEFAULT_USER' (sudo asks for the password); root works on the console"
+fi
 echo "🔑 Password : $DEFAULT_PASS"
 echo "💾 Disk     : storage '$STORAGE'   Image cache: $CACHE_DIR"
 if [[ "$OS_TYPE" == "omarchy" ]]; then
