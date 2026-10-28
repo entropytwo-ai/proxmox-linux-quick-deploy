@@ -47,6 +47,8 @@ It asks before installing anything on the host and shows the full plan before an
 
 Once both images are cached, a new VM is usually ready in seconds.
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -57,6 +59,8 @@ Once both images are cached, a new VM is usually ready in seconds.
 | **An active storage with `images` content** | Holds the VM disks (e.g. `local-lvm`, `local-zfs`, Ceph RBD, NFS). |
 | **A Linux bridge** | Detected automatically, falls back to `vmbr0`. |
 | **Free disk space** | About 1 GB per cached OS (raw + ready image). |
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
 
 ## Quick start
 
@@ -96,6 +100,8 @@ DEFAULT_USER=alice DEFAULT_PASS='S3cure!' ./create-instant-vm.sh --yes
 | `-l`, `--list` | Looks up the newest image for every menu entry, live from the official mirrors, and prints version + download URL. Needs only `curl`, no root and no Proxmox. Changes nothing. |
 | `-y`, `--yes` | Auto-confirm all prompts (same as `ASSUME_YES=1`). |
 | `-h`, `--help` | Show usage. |
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
 
 ## What the script changes on your host
 
@@ -145,6 +151,8 @@ New VM:
 Proceed with this plan? [Y/n]
 ```
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## Supported operating systems
 
 | # | Id (`OS_CHOICE`) | OS | Channel (resolved at runtime) | Boot | Cloud-init | Notes |
@@ -163,6 +171,8 @@ Proceed with this plan? [Y/n]
 | 12 | `debian-oldstable` | Debian | Previous stable | BIOS | ✅ | |
 
 Run `./create-instant-vm.sh --list` to see the exact versions these resolve to today. Example output from October 2026: Ubuntu 26.04 LTS, Ubuntu 26.10 daily, Debian 13 and 14 (testing), Fedora 44, Rocky 10.2, Alpine 3.24.1.
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
 
 ## Automatic version discovery
 
@@ -192,6 +202,8 @@ IMG_URL=https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-serv
 OS_CHOICE=ubuntu-lts ./create-instant-vm.sh
 ```
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## Configuration
 
 Every variable can be set in the environment before you run the script, or edited in the config block at the top of `create-instant-vm.sh`.
@@ -210,6 +222,8 @@ Every variable can be set in the environment before you run the script, or edite
 | `IMG_URL` | *(discovered)* | Use this image instead of the newest one. `OS_CHOICE` still picks the customization. |
 | `ASSUME_YES` | `0` | `1` auto-confirms all prompts (same as `--yes`). |
 | `STORAGE_CFG` | `/etc/pve/storage.cfg` | Proxmox storage config file to read (mostly useful for testing). |
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
 
 ## Storage auto-detection
 
@@ -237,6 +251,8 @@ CACHE_DIR=/mnt/pve/nas/cloud-images ./create-instant-vm.sh
 
 The VM disk storage is chosen separately. It's the first active `images` storage, or `VM_STORAGE` if you set it, so the cache can live on an NFS share while disks go to `local-lvm`.
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## How NixOS works
 
 The NixOS image from linuxcontainers.org is not a normal cloud image. It boots a unified kernel image (UKI) from the EFI partition, and its root filesystem holds **only `/nix/store`**, with no `/etc` at all. `/etc` is generated on first boot. That's why `virt-customize` fails on it with *"no operating systems were found in the guest image"*: there's nothing for its OS detection to find.
@@ -259,6 +275,8 @@ The accounts are ordinary mutable users. To manage them declaratively, add them 
 
 This approach was tested by booting the customized image under QEMU with OVMF: it got a DHCP address, SSH password login worked, `sudo` worked, and the root partition grew to fill the disk.
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## How Omarchy works
 
 [Omarchy](https://omarchy.org) is an opinionated Arch Linux + Hyprland setup. Its installer is interactive and needs a running system, so it can't be baked into the image ahead of time. The script gets everything ready instead:
@@ -276,6 +294,8 @@ After boot, log in as `DEFAULT_USER` (on the console or over SSH) and run:
 ```
 
 Omarchy's ready image is cached on its own (`ready-omarchy-*.qcow2`), so it never mixes with the plain Arch image.
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
 
 ## Troubleshooting / FAQ
 
@@ -354,6 +374,8 @@ rm -rf "$CACHE_DIR"        # removes all cached raw and ready images
 Cached files are versioned, so when a new release comes out the old files stay behind. List them with `--check` and delete the ones you no longer need.
 </details>
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## Security notice
 
 The defaults are built for **homelab and testing convenience**: a well-known password, root SSH login, and password authentication all turned on. Before a VM touches anything you care about:
@@ -362,10 +384,16 @@ The defaults are built for **homelab and testing convenience**: a well-known pas
 - Switch to SSH keys and turn off `PasswordAuthentication` and `PermitRootLogin`.
 - Don't expose these VMs directly to the internet.
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## Contributing
 
 PRs are welcome, especially for new distros and updated image URLs. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
 ## License
 
 MIT
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
