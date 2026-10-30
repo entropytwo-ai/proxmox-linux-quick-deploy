@@ -4,6 +4,12 @@
 
 `create-instant-vm.sh` turns "I need a fresh Linux VM" into a single menu choice. No ISO installers, no clicking through wizards: the VM boots straight into a working system with a user account, a password, and SSH you can log in to right away.
 
+<table><tr>
+<td><img src=".github/donate-bitcoin-qr.png" width="96" alt="Bitcoin donation QR code"></td>
+<td><sub>💛 If you find this project useful, I'd be grateful for any donation. Thank you!<br>
+<b>Bitcoin:</b> <code>bc1qu6dkcchurnutgc40y6n53s3zm588z9nnkm2ygq</code></sub></td>
+</tr></table>
+
 ## 🚀 One-line install
 
 Run this as root in your Proxmox VE shell:
