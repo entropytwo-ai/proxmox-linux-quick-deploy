@@ -25,6 +25,9 @@ FALLBACK_CACHE_DIR="/var/lib/vz/template/iso/cloud-images"
 STORAGE_CFG="${STORAGE_CFG:-/etc/pve/storage.cfg}"
 ASSUME_YES="${ASSUME_YES:-0}"
 CUSTOM_IMG_URL="${IMG_URL:-}"
+# Preloaded into every VM's shell history (press Up) and ~/install-dotfiles.sh.
+# Set DOTFILES_CMD="" to disable.
+DOTFILES_CMD="${DOTFILES_CMD-bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/dotfiles-nixish/main/install.sh)}"
 # CACHE_DIR    : where cloud images are cached (auto-detected if unset)
 # VM_STORAGE   : Proxmox storage for VM disks (auto-detected if unset)
 # BRIDGE       : network bridge (auto-detected if unset, defaults to vmbr0)
@@ -59,7 +62,8 @@ release each distro publishes, so new versions appear without an update.
 Environment overrides: CACHE_DIR VM_STORAGE BRIDGE OS_CHOICE (number or id,
 e.g. 'fedora') DISK_SIZE MEMORY CORES DEFAULT_USER DEFAULT_PASS ASSUME_YES
 IMG_URL (skip discovery and use this image; OS_CHOICE picks how it is
-customized)
+customized) DOTFILES_CMD (command preloaded into shell history and
+~/install-dotfiles.sh in every VM; "" disables)
 USAGE
 }
 
@@ -398,8 +402,18 @@ nixos_root_fs() {
     return 1
 }
 
+# Write the dotfiles preload files into directory $1: 'bash_history' (the
+# command, so Up-arrow recalls it) and 'install-dotfiles.sh' (runs it).
+# Returns 1 (and writes nothing) when DOTFILES_CMD is empty.
+make_dotfiles_files() {
+    [[ -n "$DOTFILES_CMD" ]] || return 1
+    printf '%s\n' "$DOTFILES_CMD" > "$1/bash_history"
+    printf '#!/usr/bin/env bash\n# Installs your dotfiles (preloaded by proxmox-linux-quick-deploy).\n%s "$@"\n' \
+        "$DOTFILES_CMD" > "$1/install-dotfiles.sh"
+}
+
 customize_nixos() {
-    local img="$1" rootdev tmp check rc=0
+    local img="$1" rootdev tmp check rc=0 dotfiles_cmds=""
     if ! rootdev=$(nixos_root_fs "$img"); then
         echo "[!] Could not find the NixOS root filesystem (/nix/store) in $img" >&2
         return 1
@@ -411,6 +425,19 @@ customize_nixos() {
     printf 'root:%s:1::::::\n%s:%s:1::::::\n' \
         "$(openssl passwd -6 "$DEFAULT_PASS")" "$DEFAULT_USER" "$(openssl passwd -6 "$DEFAULT_PASS")" > "$tmp/shadow"
     printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=true\n' > "$tmp/90-proxmox-dhcp.network"
+    if make_dotfiles_files "$tmp"; then
+        local h
+        for h in /root "/home/$DEFAULT_USER"; do
+            dotfiles_cmds+="upload $tmp/bash_history $h/.bash_history
+upload $tmp/install-dotfiles.sh $h/install-dotfiles.sh
+chmod 0600 $h/.bash_history
+chmod 0755 $h/install-dotfiles.sh
+"
+        done
+        dotfiles_cmds+="chown 1000 100 /home/$DEFAULT_USER/.bash_history
+chown 1000 100 /home/$DEFAULT_USER/install-dotfiles.sh
+"
+    fi
 
     guestfish --rw -a "$img" <<GFEOF || rc=1
 run
@@ -429,6 +456,7 @@ chmod 0700 /root
 mkdir-p /home/$DEFAULT_USER
 chown 1000 100 /home/$DEFAULT_USER
 chmod 0700 /home/$DEFAULT_USER
+$dotfiles_cmds
 GFEOF
     rm -rf "$tmp"
     [[ "$rc" == 0 ]] || return 1
@@ -715,10 +743,14 @@ if [[ "$OS_TYPE" == "omarchy" ]]; then
 fi
 
 RAW_IMG_PATH="${CACHE_DIR}/${IMG_NAME}"
+# Fingerprint of everything baked into the image: changing the user, password
+# or DOTFILES_CMD (or a new customization version) builds a fresh ready image
+# instead of silently reusing a stale one.
+CUSTOM_TAG=$(printf 'v2|%s|%s|%s' "$DEFAULT_USER" "$DEFAULT_PASS" "$DOTFILES_CMD" | sha256sum | cut -c1-8)
 if [[ "$OS_TYPE" == "omarchy" ]]; then
-    READY_IMG_PATH="${CACHE_DIR}/ready-omarchy-${IMG_NAME}"
+    READY_IMG_PATH="${CACHE_DIR}/ready-omarchy-${CUSTOM_TAG}-${IMG_NAME}"
 else
-    READY_IMG_PATH="${CACHE_DIR}/ready-${IMG_NAME}"
+    READY_IMG_PATH="${CACHE_DIR}/ready-${CUSTOM_TAG}-${IMG_NAME}"
 fi
 
 EXISTING_NAMES=$(qm list 2>/dev/null | awk 'NR>1 {print $2}')
@@ -753,6 +785,7 @@ else
     else
         echo "             (copy of the cloud image with credentials/SSH baked in via virt-customize)"
     fi
+    [[ -n "$DOTFILES_CMD" ]] && echo "             + dotfiles command preloaded in shell history and ~/install-dotfiles.sh"
 fi
 echo
 echo "New VM:"
@@ -800,7 +833,24 @@ if [[ ! -f "$READY_IMG_PATH" ]]; then
     # Bake into a temp file; only promote it to the cache when customization succeeds.
     WORK_IMG="${READY_IMG_PATH}.part"
     cp "$RAW_IMG_PATH" "$WORK_IMG"
-    trap 'rm -f "$WORK_IMG"' EXIT
+    DOTFILES_TMP=$(mktemp -d)
+    trap 'rm -f "$WORK_IMG"; rm -rf "$DOTFILES_TMP"' EXIT
+
+    # Dotfiles preload for virt-customize images: put the files in /etc/skel
+    # BEFORE the user is created (so useradd -m / cloud-init copy them), then
+    # copy them into root's and any already-existing user home.
+    DOTFILES_PRE=(); DOTFILES_POST=()
+    if make_dotfiles_files "$DOTFILES_TMP"; then
+        DOTFILES_PRE=(--mkdir /etc/skel
+            --upload "$DOTFILES_TMP/bash_history:/etc/skel/.bash_history"
+            --upload "$DOTFILES_TMP/install-dotfiles.sh:/etc/skel/install-dotfiles.sh"
+            --chmod "0600:/etc/skel/.bash_history"
+            --chmod "0755:/etc/skel/install-dotfiles.sh")
+        # The command needs bash + curl (missing on e.g. Alpine): install them
+        # when absent. Best effort — a failure here never breaks the bake.
+        DOTFILES_POST=(--run-command "if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then if command -v apk >/dev/null 2>&1; then apk add --no-cache bash curl; elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y bash curl; elif command -v dnf >/dev/null 2>&1; then dnf install -y bash curl; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm --needed bash curl; elif command -v zypper >/dev/null 2>&1; then zypper -n install bash curl; fi; fi || true"
+            --run-command "for h in /root \$(getent passwd ${DEFAULT_USER} | cut -d: -f6); do [ -d \"\$h\" ] || continue; for f in .bash_history install-dotfiles.sh; do [ -e \"\$h/\$f\" ] || cp -p /etc/skel/\$f \"\$h/\$f\"; done; [ \"\$h\" = /root ] || chown ${DEFAULT_USER}: \"\$h/.bash_history\" \"\$h/install-dotfiles.sh\"; done")
+    fi
 
     if [[ "$OS_TYPE" == "nixos" ]]; then
         if ! customize_nixos "$WORK_IMG"; then
@@ -811,6 +861,7 @@ if [[ ! -f "$READY_IMG_PATH" ]]; then
     elif [[ "$OS_TYPE" == "omarchy" ]]; then
         virt-customize -a "$WORK_IMG" \
             --root-password "password:${DEFAULT_PASS}" \
+            "${DOTFILES_PRE[@]}" \
             --run-command "id -u ${DEFAULT_USER} &>/dev/null || useradd -m -s /bin/bash -G wheel ${DEFAULT_USER}" \
             --password "${DEFAULT_USER}:password:${DEFAULT_PASS}" \
             --run-command "echo '${DEFAULT_USER} ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/${DEFAULT_USER}" \
@@ -818,17 +869,21 @@ if [[ ! -f "$READY_IMG_PATH" ]]; then
             --run-command "sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config" \
             --run-command "echo -e '#!/bin/bash\nset -e\nsudo pacman -Sy --noconfirm git curl\nwget -qO- https://omarchy.org/install | bash' > /home/${DEFAULT_USER}/install-omarchy.sh" \
             --run-command "chmod +x /home/${DEFAULT_USER}/install-omarchy.sh && chown ${DEFAULT_USER}:${DEFAULT_USER} /home/${DEFAULT_USER}/install-omarchy.sh" \
-            --run-command "echo 'echo \"👉 Run ./install-omarchy.sh to launch the Omarchy installer!\"' >> /home/${DEFAULT_USER}/.bashrc"
+            --run-command "echo 'echo \"👉 Run ./install-omarchy.sh to launch the Omarchy installer!\"' >> /home/${DEFAULT_USER}/.bashrc" \
+            "${DOTFILES_POST[@]}"
     else
         virt-customize -a "$WORK_IMG" \
             --root-password "password:${DEFAULT_PASS}" \
+            "${DOTFILES_PRE[@]}" \
             --run-command "id -u ${DEFAULT_USER} &>/dev/null || useradd -m -s /bin/bash -G sudo,adm ${DEFAULT_USER} 2>/dev/null || useradd -m -s /bin/bash -G wheel ${DEFAULT_USER}" \
             --password "${DEFAULT_USER}:password:${DEFAULT_PASS}" \
             --run-command "sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config 2>/dev/null || true" \
             --run-command "sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config 2>/dev/null || true" \
-            --run-command "rm -f /etc/ssh/sshd_config.d/*cloudimg*.conf 2>/dev/null || true"
+            --run-command "rm -f /etc/ssh/sshd_config.d/*cloudimg*.conf 2>/dev/null || true" \
+            "${DOTFILES_POST[@]}"
     fi
     mv "$WORK_IMG" "$READY_IMG_PATH"
+    rm -rf "$DOTFILES_TMP"
     trap - EXIT
 else
     echo "[*] Using cached ready image: $READY_IMG_PATH"
@@ -882,6 +937,9 @@ echo "🔑 Password : $DEFAULT_PASS"
 echo "💾 Disk     : storage '$STORAGE'   Image cache: $CACHE_DIR"
 if [[ "$OS_TYPE" == "omarchy" ]]; then
     echo "🚀 Omarchy  : Log in as '$DEFAULT_USER' and run: ./install-omarchy.sh"
+fi
+if [[ -n "$DOTFILES_CMD" ]]; then
+    echo "🧰 Dotfiles : press ↑ then Enter after login, or run ./install-dotfiles.sh"
 fi
 echo "⚠️  Change the default password after first login!"
 echo "===================================================="
