@@ -9,7 +9,8 @@
 # seen the plan and confirmed it. Run with --check first for a dry run.
 #
 # Project: https://github.com/entropytwo-ai/proxmox-linux-quick-deploy
-# License: MIT
+# License: GPL-3.0-or-later (see LICENSE)
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Every setting below can be overridden from the environment, e.g.:
 #   CACHE_DIR=/mnt/pve/nas/cloud-images MEMORY=4096 OS_CHOICE=1 ./create-instant-vm.sh

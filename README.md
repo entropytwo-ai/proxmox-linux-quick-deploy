@@ -432,6 +432,6 @@ PRs are welcome, especially for new distros and updated image URLs. See [CONTRIB
 
 ## License
 
-MIT
+This project is licensed under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
 
 <sub>[↑ Back to contents](#table-of-contents)</sub>
