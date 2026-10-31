@@ -32,6 +32,7 @@ It asks before installing anything on the host and shows the full plan before an
 - [Automatic version discovery](#automatic-version-discovery)
 - [Configuration](#configuration)
 - [Storage auto-detection](#storage-auto-detection)
+- [Preloaded dotfiles command](#preloaded-dotfiles-command)
 - [How NixOS works](#how-nixos-works)
 - [How Omarchy works](#how-omarchy-works)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
@@ -47,7 +48,7 @@ It asks before installing anything on the host and shows the full plan before an
 2. **Checks for host software** (`libguestfs-tools`, `wget`, `curl`, `openssl`). If any is missing it shows exactly what `apt-get` would install, including dependencies and disk usage, and **asks before installing**. After installing, it boots the libguestfs appliance once to prove `virt-customize` really works. If it doesn't, it **asks** before running `update-guestfs-appliance`.
 3. **Shows the full deployment plan** and asks you to confirm: where images will be downloaded and cached, which Proxmox storage will hold the VM disks (with free space), the bridge, VMID, name and resources. See [What the script changes on your host](#what-the-script-changes-on-your-host).
 4. **Finds the newest release** of the OS you pick on its official mirror (see [Automatic version discovery](#automatic-version-discovery)), then **downloads the cloud image and verifies its checksum**. This happens once per release and is cached.
-5. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize` (or `guestfish` for NixOS): root password, a sudo user, SSH password login enabled. This also happens once per release and is cached.
+5. **Bakes credentials into a copy** of the image (`ready-*.qcow2`) with `virt-customize` (or `guestfish` for NixOS): root password, a sudo user, SSH password login enabled, and your [dotfiles command preloaded](#preloaded-dotfiles-command) in shell history. This also happens once per release and is cached.
 6. **Creates the VM** with the next free VMID and a unique name (`Linux-New-1`, `Linux-New-2`, …), VirtIO SCSI + iothread, QEMU guest agent (except NixOS), serial console, and cloud-init (except NixOS).
 7. **Imports and resizes the disk**, then **starts the VM**.
 
@@ -144,7 +145,9 @@ Cloud image:
   [download] https://cloud.debian.org/images/cloud/trixie/20261021-2638/debian-13-generic-amd64-20261021-2638.qcow2
           -> /var/lib/vz/cloud-images/debian-13-trixie-20261021-2638.qcow2
              verified against https://cloud.debian.org/images/cloud/trixie/20261021-2638/SHA512SUMS
-  [create]   customized image: /var/lib/vz/cloud-images/ready-debian-13-trixie-20261021-2638.qcow2
+  [create]   customized image: /var/lib/vz/cloud-images/ready-b81f3836-debian-13-trixie-20261021-2638.qcow2
+             (copy of the cloud image with credentials/SSH baked in via virt-customize)
+             + dotfiles command preloaded in shell history and ~/install-dotfiles.sh
 
 New VM:
   ID / name : 105 / Linux-New-1
@@ -226,6 +229,7 @@ Every variable can be set in the environment before you run the script, or edite
 | `DEFAULT_PASS` | `password123` | Password for `DEFAULT_USER` and `root`. **Change it.** |
 | `OS_CHOICE` | *(interactive)* | Menu number (`1`–`12`) or id (e.g. `fedora`, `debian-stable`). Skips the menu. |
 | `IMG_URL` | *(discovered)* | Use this image instead of the newest one. `OS_CHOICE` still picks the customization. |
+| `DOTFILES_CMD` | *the dotfiles-nixish one-liner* | Command preloaded into every VM's shell history and `~/install-dotfiles.sh`. `DOTFILES_CMD=""` turns it off. See [Preloaded dotfiles command](#preloaded-dotfiles-command). |
 | `ASSUME_YES` | `0` | `1` auto-confirms all prompts (same as `--yes`). |
 | `STORAGE_CFG` | `/etc/pve/storage.cfg` | Proxmox storage config file to read (mostly useful for testing). |
 
@@ -256,6 +260,34 @@ CACHE_DIR=/mnt/pve/nas/cloud-images ./create-instant-vm.sh
 > **Tip:** If you put the cache on shared storage (NFS/CephFS), every node in the cluster reuses the same downloaded and pre-baked images.
 
 The VM disk storage is chosen separately. It's the first active `images` storage, or `VM_STORAGE` if you set it, so the cache can live on an NFS share while disks go to `local-lvm`.
+
+<sub>[↑ Back to contents](#table-of-contents)</sub>
+
+## Preloaded dotfiles command
+
+VMs without the QEMU guest agent (NixOS, or any VM before the agent is installed) have no clipboard in the Proxmox console, so long commands have to be typed by hand. To avoid that, every VM comes with the [dotfiles-nixish](https://github.com/entropytwo-ai/dotfiles-nixish) installer ready to run, for both `DEFAULT_USER` and `root`:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/dotfiles-nixish/main/install.sh)
+```
+
+- **Shell history:** log in, press **↑**, then **Enter**.
+- **Script:** `./install-dotfiles.sh` runs the same command. Arguments are passed through, e.g. `./install-dotfiles.sh --zsh`.
+
+How it gets there:
+
+- **cloud-init distros:** the two files go into `/etc/skel`, so the user that cloud-init creates on first boot gets them, and they are also copied into `/root` and any user home that already exists in the image.
+- **NixOS:** written straight into `/root` and `/home/$DEFAULT_USER` with `guestfish`. NixOS already ships `bash` and `curl`.
+- **Missing `bash` or `curl`** (Alpine ships neither) are installed into the image with its package manager. This step is best effort and never fails the build.
+
+Use a different command, or turn it off:
+
+```bash
+DOTFILES_CMD='bash <(curl -fsSL https://example.com/my-setup.sh)' ./create-instant-vm.sh
+DOTFILES_CMD='' ./create-instant-vm.sh
+```
+
+The cached `ready-*` image name contains a short fingerprint of the user, password and `DOTFILES_CMD` (`ready-<fingerprint>-<image>`). If you change any of them, a new ready image is built automatically instead of reusing an old one.
 
 <sub>[↑ Back to contents](#table-of-contents)</sub>
 

@@ -55,11 +55,13 @@ OS options are discovered at runtime, not hard-coded. Each one is a **resolver f
    - **Keep it quick.** A resolver should take a few HTTP requests. `--list` and `--check` run every resolver.
    - Prefer listings via `sed -n '1,Np'` over `head -n N` when reading from `curl`, so curl doesn't print "Failure writing output" errors.
 
-3. **Customization.** The `standard` path creates the user (falling back from `sudo,adm` to `wheel`), sets passwords, and enables SSH password login. That's enough for most cloud images. If your OS needs something different, add a new `OS_TYPE` branch in the "Baking credentials" section. Keep the changes **idempotent**. `virt-customize --run-command` runs inside the guest image and needs an image that libguestfs' OS inspection recognises. If it doesn't (like NixOS, which has no `/etc` until first boot), use `guestfish` the way `customize_nixos` does, and read the result back before caching it.
+3. **Customization.** The `standard` path creates the user (falling back from `sudo,adm` to `wheel`), sets passwords, and enables SSH password login. That's enough for most cloud images. If your OS needs something different, add a new `OS_TYPE` branch in the "Baking credentials" section. Keep the changes **idempotent**. `virt-customize --run-command` runs inside the guest image and needs an image that libguestfs' OS inspection recognises. If it doesn't (like NixOS, which has no `/etc` until first boot), use `guestfish` the way `customize_nixos` does, and read the result back before caching it. A new `OS_TYPE` should also get the [preloaded dotfiles command](README.md#preloaded-dotfiles-command): add `"${DOTFILES_PRE[@]}"` before the user is created and `"${DOTFILES_POST[@]}"` at the end of its `virt-customize` call, or use `make_dotfiles_files` in a `guestfish` path.
 
-4. **Cloud-init.** If the image doesn't support cloud-init (like NixOS), exclude it in the `if [[ "$OS_TYPE" != "nixos" ]]` block.
+4. **Ready-image cache key.** Ready images are cached as `ready-<fingerprint>-<image>`, where the fingerprint is `CUSTOM_TAG`. If you change *what* gets baked into images, bump the `v2` prefix in `CUSTOM_TAG` so that existing caches are rebuilt instead of reused.
 
-5. **Docs.** Add rows to the *Supported operating systems* and *Automatic version discovery* tables in `README.md`. Add a "How X works" section if it behaves differently.
+5. **Cloud-init.** If the image doesn't support cloud-init (like NixOS), exclude it in the `if [[ "$OS_TYPE" != "nixos" ]]` block.
+
+6. **Docs.** Add rows to the *Supported operating systems* and *Automatic version discovery* tables in `README.md`. Add a "How X works" section if it behaves differently.
 
 ## Testing locally
 
